@@ -1,0 +1,86 @@
+services:
+  postgres-ads:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ads
+      POSTGRES_PASSWORD: ads
+      POSTGRES_DB: ads
+    volumes:
+      - postgres-ads-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ads -d ads"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-analytics:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: analytics
+      POSTGRES_DB: analytics
+    volumes:
+      - postgres-analytics-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics -d analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      # Management UI only; the AMQP port stays internal to the compose network.
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  ad-service:
+    build: ./ad-service
+    ports:
+      - "8080:8080"
+    environment:
+      AD_SERVICE_PORT: 8080
+      AD_DATABASE_URL: postgres://ads:ads@postgres-ads:5432/ads
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: ad-events
+      JWT_SECRET: change-me-in-production
+    depends_on:
+      postgres-ads:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  analytics-service:
+    build: ./analytics-service
+    ports:
+      - "8081:8081"
+    environment:
+      ANALYTICS_SERVICE_PORT: 8081
+      ANALYTICS_DATABASE_URL: postgres://analytics:analytics@postgres-analytics:5432/analytics
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: ad-events
+      RABBITMQ_QUEUE: analytics-events
+    depends_on:
+      postgres-analytics:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  postgres-ads-data:
+  postgres-analytics-data:

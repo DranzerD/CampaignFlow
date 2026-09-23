@@ -1,0 +1,4 @@
+.env
+/ad-service/ad-service
+/analytics-service/analytics-service
+*.exe
