@@ -59,7 +59,8 @@ func main() {
 
 	publisher, err := queue.NewPublisher(
 		env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
-		env("RABBITMQ_EXCHANGE", "ad-events"))
+		env("RABBITMQ_EXCHANGE", "ad-events"),
+		env("RABBITMQ_QUEUE", "analytics-events"))
 	if err != nil {
 		log.Fatalf("rabbitmq: %v", err)
 	}

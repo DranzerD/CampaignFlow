@@ -3,8 +3,10 @@ package handlers
 import (
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -98,6 +100,21 @@ func (a *API) RecordClick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Best-effort abuse guard: reject a second click for the same ad from the
+	// same client within a short window. This is not real click attribution
+	// (the spec's click endpoint carries no impression or session identity to
+	// verify against) -- it only stops the trivial double-submit/retry case
+	// from inflating clicks past impressions. See cache.AllowClick.
+	if a.Cache != nil {
+		allowed, err := a.Cache.AllowClick(r.Context(), adID, clientKey(r))
+		if err != nil {
+			log.Printf("click dedup check failed: %v", err)
+		} else if !allowed {
+			writeError(w, http.StatusConflict, "duplicate click ignored")
+			return
+		}
+	}
+
 	campaignID, err := a.Store.CampaignIDForAd(r.Context(), adID)
 	if errors.Is(err, db.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "ad does not exist")
@@ -119,4 +136,19 @@ func (a *API) RecordClick(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+// clientKey identifies the caller for click deduplication. It prefers the
+// first hop of X-Forwarded-For (set by a reverse proxy) and falls back to the
+// raw remote address, stripping the port.
+func clientKey(r *http.Request) string {
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		if ip := strings.TrimSpace(strings.Split(fwd, ",")[0]); ip != "" {
+			return ip
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }

@@ -73,6 +73,30 @@ func totalSpendKey(campaignID string) string {
 	return fmt.Sprintf("campaign:%s:total_spend", campaignID)
 }
 
+// clickDedupWindow is how long a given (ad, client) pair is blocked from
+// registering a second click. POST /events/click carries no session or
+// impression identity by spec, so this cannot detect a determined attacker
+// spoofing IPs -- see the README's known limitations. It does stop the
+// trivial case of a double-submit or a naive retry/refresh loop from
+// inflating a campaign's clicks past its impressions.
+const clickDedupWindow = 2 * time.Second
+
+func clickDedupKey(adID, clientKey string) string {
+	return fmt.Sprintf("click:dedup:%s:%s", adID, clientKey)
+}
+
+// AllowClick reports whether a click from clientKey (typically the caller's
+// IP) for adID may be recorded. It uses SET NX, which is atomic, so two
+// concurrent clicks for the same (ad, client) pair cannot both pass the
+// check the way a separate EXISTS-then-SET would.
+func (c *Cache) AllowClick(ctx context.Context, adID, clientKey string) (bool, error) {
+	ok, err := c.rdb.SetNX(ctx, clickDedupKey(adID, clientKey), 1, clickDedupWindow).Result()
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
 // GetCandidates returns the cached candidate list for a keyword.
 func (c *Cache) GetCandidates(ctx context.Context, keyword string) ([]models.Candidate, bool) {
 	raw, err := c.rdb.Get(ctx, keywordKey(keyword)).Bytes()

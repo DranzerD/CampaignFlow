@@ -297,10 +297,75 @@ PostgreSQL, Redis and RabbitMQ by service name. Between them they cover
 campaign create/fetch/update, ad creation, login, rejected and foreign-token
 requests, highest-bid selection, tie-breaking, paused ads, paused campaigns,
 expired campaigns, daily and total budget enforcement, concurrent serving under
-a budget, impression and click aggregation, duplicate-event idempotency, CTR,
-and privacy suppression.
+a budget, malformed event ids, click deduplication, impression and click
+aggregation, duplicate-event idempotency, CTR, and privacy suppression.
 
-## 13. Known limitations
+**`e2e-test.sh`** covers what the suites above deliberately don't: the real
+publish → RabbitMQ → consume → ack lifecycle. The integration tests run the Ad
+Service with `Publisher: nil` and call the Analytics `RecordEvent` function
+directly, which is the right way to unit-test business logic but never
+exercises the broker. `e2e-test.sh` instead drives both services purely over
+HTTP -- login, create a campaign and ad, serve real impressions, record real
+clicks, and poll the report endpoint until the Analytics consumer has
+processed them -- and separately asserts the queue/exchange binding exists via
+the RabbitMQ management API, which is what fix #2 below actually guarantees.
+
+```bash
+docker compose up -d --build
+./e2e-test.sh
+```
+
+## 13. Fixes from review
+
+An earlier review of this project found three correctness gaps and a testing
+gap. Documenting them here rather than pretending the first version was
+already right:
+
+* **Invalid event ids could requeue forever.** `Event.Validate()` originally
+  only checked that `id`/`ad_id`/`campaign_id` were non-empty, not that they
+  were valid UUIDs. A malformed value passed validation, then failed the
+  Postgres `INSERT` (a UUID column), and the consumer's
+  ack-after-database-write contract nacked it with `requeue=true` -- so the
+  same malformed message would fail identically forever, permanently stuck at
+  the head of the queue. Fixed by parsing each id with `uuid.Parse` in
+  `Validate()`, so a malformed id is now discarded (no requeue) before it ever
+  reaches the database. See
+  [`analytics-service/internal/models/models.go`](analytics-service/internal/models/models.go).
+* **Events could be lost on a cold start.** The queue and its binding to the
+  `ad-events` exchange were declared only by the Analytics consumer. A fanout
+  exchange with no bound queue silently discards anything published to it, so
+  if the Ad Service served ads before Analytics had started and bound its
+  queue, those impressions vanished with no error anywhere. Fixed by having
+  the Ad Service's publisher declare the same exchange, queue and binding on
+  connect (idempotent, so declaring it twice is harmless) -- whichever service
+  starts first now creates the topology. Also enabled RabbitMQ publisher
+  confirms, so a broker-side rejection is now visible in the logs instead of
+  silently assumed to have succeeded. Verified by starting only the Ad Service
+  side of the stack, serving impressions with Analytics still down, and
+  confirming they sit in the queue rather than disappear. See
+  [`ad-service/internal/queue/publisher.go`](ad-service/internal/queue/publisher.go).
+* **Clicks were unauthenticated and unconstrained.** `POST /events/click`
+  carries no session or impression identity by spec, so nothing stopped
+  unlimited clicks being recorded for any ad -- a real gap for trustworthy
+  CTR. Full click-to-impression attribution (a token issued by `/serve` and
+  checked on click) would change the fixed request/response shapes the spec
+  defines, so instead added a lightweight, spec-compatible guard: an atomic
+  Redis `SET NX` rejects a second click for the same `(ad, caller)` pair
+  within a short window, returning `409 Conflict` (already one of the spec's
+  defined error codes). This is **not** real fraud prevention -- it doesn't
+  stop a determined attacker rotating IPs -- it only stops the trivial
+  double-submit/retry case from inflating clicks past impressions. Real
+  click-to-impression attribution stays a known limitation below. See
+  `AllowClick` in
+  [`ad-service/internal/cache/cache.go`](ad-service/internal/cache/cache.go).
+* **The real message lifecycle was never tested end to end.** The Ad Service
+  integration tests run with `Publisher: nil` and the Analytics tests call
+  `RecordEvent` directly, so the actual publish → RabbitMQ → consume → ack
+  path was only ever exercised by hand. Added `e2e-test.sh` (see above), which
+  drives both services over real HTTP and confirms the RabbitMQ topology
+  itself, not just the business logic.
+
+## 14. Known limitations
 
 This is a teaching-sized system, not production advertising infrastructure.
 
@@ -313,10 +378,19 @@ This is a teaching-sized system, not production advertising infrastructure.
   advertiser's timezone.
 * **`limit` on `/serve` is validated but only the single best ad is returned**,
   which is what the response shape describes.
-* **Events are published fire-and-forget.** Publisher confirms are not enabled,
-  and if the buffer to the broker is full events are dropped with a log line
-  rather than slowing down serving. The at-least-once guarantee covers the
-  broker-to-consumer hop, not the handler-to-broker hop.
+* **Events are still published fire-and-forget from the handler's point of
+  view.** Publisher confirms are now enabled and checked (see the fixes
+  above), so a broker-side rejection is logged rather than assumed to have
+  succeeded -- but if the buffer to the background publisher goroutine is
+  full, the event is still dropped with a log line rather than slowing down
+  serving. The at-least-once guarantee covers the broker-to-consumer hop, not
+  a full-buffer drop before the message ever reaches the broker.
+* **Click deduplication is a short per-(ad, IP) debounce, not real
+  attribution.** It stops accidental double-submits, not a determined client
+  spoofing its address or a script clicking from many IPs. Real click fraud
+  prevention needs clicks tied to a specific served impression (a token
+  issued by `/serve` and checked on click), which is a bigger change to the
+  spec's fixed API shapes than this project makes.
 * **`events_raw` grows without bound.** Nothing prunes it; a real deployment
   would expire raw events once aggregated.
 * **No pagination, no listing endpoints, no advertiser sign-up.** The demo

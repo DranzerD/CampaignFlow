@@ -78,4 +78,23 @@ func TestEventValidation(t *testing.T) {
 	if err := missing.Validate(); err == nil {
 		t.Error("events without an id must be rejected")
 	}
+
+	// A non-empty but malformed id must be rejected too: it is not just an
+	// empty-string check, since events_raw stores these as UUID columns and a
+	// malformed value would otherwise fail the insert on every redelivery and
+	// requeue forever.
+	for _, field := range []string{"id", "ad_id", "campaign_id"} {
+		malformed := valid
+		switch field {
+		case "id":
+			malformed.ID = "not-a-uuid"
+		case "ad_id":
+			malformed.AdID = "not-a-uuid"
+		case "campaign_id":
+			malformed.CampaignID = "not-a-uuid"
+		}
+		if err := malformed.Validate(); err == nil {
+			t.Errorf("malformed %s must be rejected", field)
+		}
+	}
 }

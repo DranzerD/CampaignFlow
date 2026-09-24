@@ -4,6 +4,8 @@ import (
 	"errors"
 	"math"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // DateLayout is the layout used for every date crossing the API boundary.
@@ -33,21 +35,37 @@ type Event struct {
 	Timestamp  time.Time `json:"timestamp"`
 }
 
-// Validate rejects malformed events before they reach the database.
+// Validate rejects malformed events before they reach the database. ad_id,
+// campaign_id and id must be well-formed UUIDs -- not just non-empty -- since
+// events_raw and campaign_stats both store them as the UUID column type. A
+// value that merely passed an empty-string check would fail the INSERT and,
+// left unguarded, get nacked-and-requeued by the consumer forever because the
+// same malformed value would fail on every redelivery too.
 func (e Event) Validate() error {
 	switch {
 	case e.ID == "":
 		return errors.Join(ErrInvalidEvent, errors.New("missing id"))
+	case !isUUID(e.ID):
+		return errors.Join(ErrInvalidEvent, errors.New("id is not a valid uuid"))
 	case e.AdID == "":
 		return errors.Join(ErrInvalidEvent, errors.New("missing ad_id"))
+	case !isUUID(e.AdID):
+		return errors.Join(ErrInvalidEvent, errors.New("ad_id is not a valid uuid"))
 	case e.CampaignID == "":
 		return errors.Join(ErrInvalidEvent, errors.New("missing campaign_id"))
+	case !isUUID(e.CampaignID):
+		return errors.Join(ErrInvalidEvent, errors.New("campaign_id is not a valid uuid"))
 	case e.EventType != EventImpression && e.EventType != EventClick:
 		return errors.Join(ErrInvalidEvent, errors.New("unknown event_type"))
 	case e.Timestamp.IsZero():
 		return errors.Join(ErrInvalidEvent, errors.New("missing timestamp"))
 	}
 	return nil
+}
+
+func isUUID(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil
 }
 
 // Report is the /reports/campaign/{id} response. Impressions, clicks and CTR

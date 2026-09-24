@@ -502,3 +502,28 @@ func TestClickRequiresKnownAd(t *testing.T) {
 		t.Errorf("expected 404 for unknown ad, got %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestDuplicateClickIsRejected(t *testing.T) {
+	h := newHarness(t)
+	_, token := h.newAdvertiser(t)
+	campaign := h.createCampaign(t, token, 1000000, 100000)
+	ad := h.createAd(t, token, campaign.ID, uniqueKeyword(), 100, models.StatusActive)
+
+	rec := h.do(t, http.MethodPost, "/events/click?ad_id="+ad.ID, "", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first click: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Same ad, same caller, no time passed: the debounce window rejects it.
+	rec = h.do(t, http.MethodPost, "/events/click?ad_id="+ad.ID, "", nil)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409 for a near-instant duplicate click, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A different ad from the same caller is unaffected by the other ad's window.
+	otherAd := h.createAd(t, token, campaign.ID, uniqueKeyword(), 100, models.StatusActive)
+	rec = h.do(t, http.MethodPost, "/events/click?ad_id="+otherAd.ID, "", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("click on a different ad should not be blocked, got %d %s", rec.Code, rec.Body.String())
+	}
+}

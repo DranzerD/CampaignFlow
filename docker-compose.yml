@@ -56,6 +56,7 @@ services:
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       RABBITMQ_EXCHANGE: ad-events
+      RABBITMQ_QUEUE: analytics-events
       JWT_SECRET: change-me-in-production
     depends_on:
       postgres-ads:
